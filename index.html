@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="manifest" href="manifest.webmanifest"><meta name="theme-color" content="#12304a"><link rel="icon" href="icon-192.png">
+<title>Laguipres SST – Poste agent</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,Segoe UI,Arial,sans-serif;background:#f4f6f8;color:#1c2733}
+header{background:#12304a;color:#fff;padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+header h1{font-size:17px;margin:0;flex:1}header .m{font-size:12px;opacity:.85}
+main{max-width:860px;margin:0 auto;padding:14px}
+.card{background:#fff;border:1px solid #dde3ea;border-radius:8px;padding:12px;margin:0 0 10px}
+.row{display:flex;flex-wrap:wrap;gap:8px}.row>*{flex:1 1 150px}
+label{display:block;font-size:12px;color:#51606f;margin:8px 0 2px}
+input,select,textarea{width:100%;padding:8px;border:1px solid #c5ced8;border-radius:6px;font:inherit;background:#fff}
+textarea{min-height:64px}
+button{padding:8px 12px;border:0;border-radius:6px;background:#12304a;color:#fff;font:inherit;cursor:pointer}
+button.g{background:#e6ebf0;color:#12304a}button.s{padding:4px 8px;font-size:13px}
+.b{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;color:#fff}
+.Faible{background:#3a8a4b}.Modérée{background:#c58a00}.Élevée{background:#d4622a}.Critique{background:#b3261e}
+.m{color:#51606f;font-size:13px}.warn{background:#fff4d6;border-color:#e8c15a}
+.item{cursor:pointer}.item:hover{border-color:#12304a}
+.tabs{display:flex;gap:6px;margin:0 0 12px}.tabs button.on{background:#12304a;color:#fff}
+#toast{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);background:#1c2733;color:#fff;padding:8px 14px;border-radius:6px;display:none;max-width:90%}
+</style></head><body>
+<header><h1>Laguipres Sécurité – Incidents SST</h1><span class="m" id="st"></span>
+<button class="g s" onclick="connect()">Dossier partagé…</button><button class="g s" onclick="load(true);pull(true)">Actualiser</button><button class="g s" onclick="cfgSync()">Synchronisation…</button></header>
+<main id="app"></main><div id="toast"></div>
+<script>
+var STATES=["Déclaré","Qualifié","En investigation","Actions en cours","Vérification d'efficacité","Clôturé"];
+var TYPES=["Presqu'accident","Situation dangereuse","Accident sans arrêt","Accident avec arrêt","Incident environnemental","Urgence"];
+var SITES=["Site minier – Boké","Site industriel – Fria","Agence bancaire – Conakry","Résidence – Conakry","Corridor ferroviaire – Simandou"];
+var CODE=["BOK","FRI","CKY","RES","SMD"];
+var LOCAL=!window.showDirectoryPicker,dir=null,pendingHandle=null,cases={},sel=null,tab="list",me=localStorage.getItem("lag-me")||"";
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+function lvl(g,p){var s=g*p;return s<=4?"Faible":s<=8?"Modérée":s<=12?"Élevée":"Critique"}
+function today(){var d=new Date();return d.getFullYear()+"-"+("0"+(d.getMonth()+1)).slice(-2)+"-"+("0"+d.getDate()).slice(-2)}
+function rnd(){return Math.random().toString(36).slice(2,6).toUpperCase()}
+function slug(s){return(s||"anon").normalize("NFD").replace(/[^\w]+/g,"-").replace(/^-|-$/g,"").toLowerCase()||"anon"}
+function toast(t){var e=document.getElementById("toast");e.textContent=t;e.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(function(){e.style.display="none"},3500)}
+function v(i){return document.getElementById(i).value}
+/* ---- stockage du dossier (poignée mémorisée) ---- */
+function idb(){return new Promise(function(r,j){var q=indexedDB.open("lag-sst",1);q.onupgradeneeded=function(){q.result.createObjectStore("k")};q.onsuccess=function(){r(q.result)};q.onerror=j})}
+function kget(k){return idb().then(function(d){return new Promise(function(r){var t=d.transaction("k").objectStore("k").get(k);t.onsuccess=function(){r(t.result)};t.onerror=function(){r(null)}})})}
+function kset(k,x){return idb().then(function(d){return new Promise(function(r){var t=d.transaction("k","readwrite");t.objectStore("k").put(x,k);t.oncomplete=r})})}
+function useLS(){return LOCAL||(!dir&&!!GH.repo)}
+function status(){document.getElementById("st").textContent=(me?me+" · ":"")+(LOCAL?"Mode téléphone : enregistré sur l'appareil":dir?"Dossier connecté : "+dir.name:"Dossier non connecté")+" · "+ghStatus()}
+async function connect(){if(LOCAL){toast("Sur téléphone, utilisez « Envoyer au bureau ».");return}
+try{dir=await showDirectoryPicker({mode:"readwrite"});pendingHandle=null;await kset("dir",dir);await load(true)}catch(e){}status();render()}
+async function restore(){if(LOCAL){await load();status();return}try{var h=await kget("dir");if(h){if(await h.queryPermission({mode:"readwrite"})==="granted"){dir=h;await load()}else pendingHandle=h}}catch(e){}status();render()}
+async function regrant(){try{if(await pendingHandle.requestPermission({mode:"readwrite"})==="granted"){dir=pendingHandle;pendingHandle=null;await load(true)}}catch(e){}status();render()}
+/* ---- lecture / écriture : un fichier par version, nom unique par auteur ---- */
+async function load(manual){if(useLS()){try{cases=JSON.parse(localStorage.getItem("lag-local")||"{}")}catch(e){cases={}}applyRemote();var b=document.activeElement;if(manual||!(b&&/INPUT|TEXTAREA|SELECT/.test(b.tagName)))render();return}if(!dir)return;var out={};
+try{var cd=await dir.getDirectoryHandle("cases");
+for await(var e of cd.entries()){if(e[1].kind==="file"){if(/\.json$/.test(e[0])){try{var c0=JSON.parse(await(await e[1].getFile()).text());if(c0&&c0.key&&(!out[c0.key]||c0.t>out[c0.key].t))out[c0.key]=c0}catch(x){}}continue}if(e[1].kind!=="directory")continue;
+for await(var f of e[1].entries()){if(!/\.json$/.test(f[0]))continue;
+try{var c=JSON.parse(await(await f[1].getFile()).text());if(c&&c.key&&(!out[c.key]||c.t>out[c.key].t))out[c.key]=c}catch(x){}}}}catch(x){}
+cases=out;applyRemote();var a=document.activeElement;if(manual||!(a&&/INPUT|TEXTAREA|SELECT/.test(a.tagName)))render();if(manual)toast("Données actualisées.")}
+async function save(c){if(useLS()){if(!me){toast("Indiquez votre nom.");return false}c.t=new Date().toISOString();c.by=me;cases[c.key]=c;try{localStorage.setItem("lag-local",JSON.stringify(cases))}catch(e){toast("Stockage plein : envoyez vos dossiers.");return false}enqueue(c);return true}if(!dir){toast("Connectez d'abord le dossier partagé.");return false}
+if(!me){toast("Indiquez votre nom.");return false}
+try{c.t=new Date().toISOString();c.by=me;
+var d1=await dir.getDirectoryHandle("cases",{create:true}),d2=await d1.getDirectoryHandle(c.key,{create:true});
+var fh=await d2.getFileHandle(c.t.replace(/[:.]/g,"-")+"_"+slug(me)+".json",{create:true});
+var w=await fh.createWritable();await w.write(JSON.stringify(c));await w.close();cases[c.key]=c;enqueue(c);return true}
+catch(e){toast("Écriture impossible : "+e.message);return false}}
+function edit(key,fn){var c=JSON.parse(JSON.stringify(cases[key]));fn(c);return save(c).then(function(ok){if(ok)render();return ok})}
+/* ---- vues ---- */
+function render(){var m=document.getElementById("app"),h="";
+if(LOCAL)h+='<div class="card">Mode téléphone : vos dossiers sont enregistrés sur cet appareil. Utilisez <b>Envoyer au bureau</b> après chaque saisie (WhatsApp, e-mail ou Drive).</div>';
+if(!me)h+='<div class="card warn"><b>Première utilisation</b><label>Votre nom et fonction</label><input id="me" placeholder="ex. Mamadou Diallo, superviseur Boké"><p><button onclick="setMe()">Valider</button></p></div>';
+if(pendingHandle&&!dir)h+='<div class="card warn">Le dossier partagé doit être reconnecté. <button class="s" onclick="regrant()">Reconnecter</button></div>';
+if(!GH.repo)h+='<div class="card warn"><b>Activation de la synchronisation</b><label>Code d\'activation fourni par le service HSE</label><input id="act" placeholder="LAG1.…"><p><button onclick="activate()">Activer</button></p></div>';
+h+='<div class="tabs"><button class="'+(tab==="list"?"on":"g")+'" onclick="tab=\'list\';sel=null;render()">Dossiers</button><button class="'+(tab==="new"?"on":"g")+'" onclick="tab=\'new\';render()">Nouveau signalement</button>'+(LOCAL?'<button class="g" onclick="sendAll()">Envoyer au bureau</button>':'<button class="g" onclick="exportJson()">Exporter la synthèse</button>')+'</div>';
+h+=tab==="new"?vNew():(sel&&cases[sel]?vDetail():vList());m.innerHTML=h;if(tab==="new")crit()}
+function setMe(){var n=v("me").trim();if(!n)return;me=n;localStorage.setItem("lag-me",n);status();render()}
+function list(){return Object.keys(cases).map(function(k){return cases[k]}).sort(function(a,b){return b.date.localeCompare(a.date)})}
+function late(c){return(c.acts||[]).filter(function(a){return!a.done&&a.due&&a.due<today()}).length}
+function vList(){var L=list(),ouv=L.filter(function(c){return c.state<5}).length,ret=L.reduce(function(n,c){return n+late(c)},0);
+var h='<div class="card"><b>'+L.length+'</b> dossier(s) · <b>'+ouv+'</b> ouvert(s) · <b>'+ret+'</b> action(s) en retard</div>';
+if(!L.length)return h+'<div class="card m">Aucun dossier pour le moment.</div>';
+return h+L.map(function(c){var l=lvl(c.g,c.p);return'<div class="card item" onclick="sel=\''+esc(c.key)+'\';render()"><b>'+esc(c.id)+'</b> <span class="b '+l+'">'+l+'</span> '+(late(c)?'<span class="b Critique">retard</span>':'')+'<div>'+esc(c.type)+' · '+esc(c.site)+'</div><div class="m">'+esc(c.date.replace("T"," "))+' · '+esc(STATES[c.state])+' · saisi par '+esc(c.by||"?")+'</div></div>'}).join("")}
+function opts(a,s){return a.map(function(x,i){return'<option value="'+i+'"'+(i===s?" selected":"")+'>'+esc(x)+'</option>'}).join("")}
+function vNew(){var d=new Date(),iso=today()+"T"+("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2);
+return'<div class="card"><div class="row"><div><label>Type</label><select id="n-type">'+opts(TYPES,0)+'</select></div><div><label>Site</label><select id="n-site">'+opts(SITES,0)+'</select></div><div><label>Date et heure</label><input id="n-date" type="datetime-local" value="'+iso+'"></div></div>'
++'<label>Description des faits</label><textarea id="n-desc"></textarea><label>Mesures immédiates</label><textarea id="n-imm"></textarea><label>Personne concernée (fonction, sans nom)</label><input id="n-who">'
++'<div class="row"><div><label>Gravité (1-5)</label><select id="n-g" onchange="crit()">'+[1,2,3,4,5].map(function(i){return'<option>'+i+'</option>'}).join("")+'</select></div><div><label>Probabilité (1-5)</label><select id="n-p" onchange="crit()">'+[1,2,3,4,5].map(function(i){return'<option>'+i+'</option>'}).join("")+'</select></div><div><label>Criticité</label><div id="n-crit"></div></div></div>'
++'<p><button onclick="submitNew()">Enregistrer le signalement</button></p></div>'}
+function crit(){var g=+v("n-g"),p=+v("n-p"),l=lvl(g,p);document.getElementById("n-crit").innerHTML='<span class="b '+l+'">'+l+'</span> <span class="m">'+g*p+'</span>'}
+async function submitNew(){var d=v("n-desc").trim();if(!d){toast("Ajoutez une description des faits.");return}
+var si=+v("n-site"),dt=v("n-date"),key=Date.now().toString(36)+"-"+rnd();
+var c={key:key,id:CODE[si]+"-"+dt.slice(0,10).replace(/-/g,"")+"-"+rnd(),type:TYPES[+v("n-type")],site:SITES[si],date:dt,desc:d,imm:v("n-imm"),who:v("n-who"),g:+v("n-g"),p:+v("n-p"),state:0,faits:"",ana:"",hist:[today()+" Déclaré"],acts:[]};
+if(await save(c)){toast("Signalement "+c.id+" enregistré.");sel=key;tab="list";render()}}
+function vDetail(){var c=cases[sel],l=lvl(c.g,c.p);
+return'<p><button class="g s" onclick="sel=null;render()">← Retour</button> '+(LOCAL?'<button class="s" onclick="sendCase(sel)">Envoyer ce dossier</button>':'')+'</p><div class="card"><b>'+esc(c.id)+'</b> <span class="b '+l+'">'+l+'</span><div>'+esc(c.type)+' · '+esc(c.site)+'</div><div class="m">'+esc(c.date.replace("T"," "))+' · saisi par '+esc(c.by||"?")+'</div><p>'+esc(c.desc)+'</p><div class="m">Mesures immédiates : '+esc(c.imm||"—")+'</div></div>'
++'<div class="card"><label>État</label><select onchange="setState(+this.value)">'+opts(STATES,c.state)+'</select>'
++'<label>Faits confirmés</label><textarea id="d-faits">'+esc(c.faits)+'</textarea><label>Hypothèses de causes</label><textarea id="d-ana">'+esc(c.ana)+'</textarea><p><button onclick="saveTxt()">Enregistrer</button></p></div>'
++'<div class="card"><b>Actions correctives</b>'+((c.acts||[]).map(function(a,i){return'<div style="margin:6px 0">'+(a.done?'✔ ':'☐ ')+esc(a.t)+' <span class="m">— '+esc(a.who||"?")+', échéance '+esc(a.due||"?")+(!a.done&&a.due&&a.due<today()?' <b style="color:#b3261e">en retard</b>':'')+'</span> '+(a.done?'':'<button class="s g" onclick="doneAct('+i+')">Fait</button>')+'</div>'}).join("")||'<div class="m">Aucune action.</div>')
++'<div class="row"><div><label>Action</label><input id="a-t"></div><div><label>Responsable</label><input id="a-who"></div><div><label>Échéance</label><input id="a-due" type="date"></div></div><p><button onclick="addAct()">Ajouter l\'action</button></p></div>'
++'<div class="card m"><b>Historique</b><br>'+(c.hist||[]).map(esc).join("<br>")+'</div>'}
+function saveTxt(){edit(sel,function(c){c.faits=v("d-faits");c.ana=v("d-ana")}).then(function(ok){if(ok)toast("Enregistré.")})}
+function setState(s){var c=cases[sel];
+if(s>=2&&!(document.getElementById("d-faits").value.trim()||c.faits.trim())){toast("Renseignez d'abord les faits confirmés.");return render()}
+if(s>=4&&(c.acts||[]).some(function(a){return!a.done})){toast("Des actions restent ouvertes.");return render()}
+edit(sel,function(x){x.faits=document.getElementById("d-faits").value;x.ana=document.getElementById("d-ana").value;x.state=s;x.hist.push(today()+" "+STATES[s])})}
+function addAct(){var t=v("a-t").trim();if(!t){toast("Décrivez l'action.");return}
+edit(sel,function(c){c.acts=c.acts||[];c.acts.push({t:t,who:v("a-who"),due:v("a-due"),done:false})})}
+function doneAct(i){edit(sel,function(c){c.acts[i].done=true})}
+function exportJson(){var b=new Blob([JSON.stringify(list(),null,1)],{type:"application/json"}),a=document.createElement("a");
+a.href=URL.createObjectURL(b);a.download="dossiers-sst-"+today()+".json";a.click()}
+function mkFile(c){return new File([JSON.stringify(c)],c.t.replace(/[:.]/g,"-")+"_"+slug(c.by||me)+"_"+c.key+".json",{type:"application/json"})}
+async function sendFiles(fs){if(!fs.length){toast("Aucun dossier à envoyer.");return}
+try{if(navigator.canShare&&navigator.canShare({files:fs})){await navigator.share({files:fs,title:"Dossiers SST Laguipres",text:fs.length+" dossier(s) SST"});return}}catch(e){if(e&&e.name==="AbortError")return}
+fs.forEach(function(f){var a=document.createElement("a");a.href=URL.createObjectURL(f);a.download=f.name;a.click()});toast("Fichier(s) enregistré(s) dans Téléchargements.")}
+function sendCase(k){sendFiles([mkFile(cases[k])])}
+function sendAll(){sendFiles(list().map(mkFile))}
+var CF=window.LAG_CFG||{},GH={},Q=[],busy=false,ghErr=0,GC={seen:{},cases:{}},pulling=false;
+try{GH=JSON.parse(localStorage.getItem("lag-gh")||"{}");Q=JSON.parse(localStorage.getItem("lag-q")||"[]");GC=JSON.parse(localStorage.getItem("lag-gh-cache")||"null")||GC}catch(e){}
+try{var hh=location.hash;if(hh.indexOf("#cfg=")===0){var hv=hh.slice(5);if(hv.indexOf("LAG1.")===0)CF={code:hv};else{var oo=JSON.parse(unb64(hv));CF={name:oo.name||"",repo:oo.repo||"",token:oo.token||""}}try{history.replaceState(null,"",location.pathname+location.search)}catch(e){}}}catch(e){}
+function fromCode(c){try{var o=JSON.parse(unb64(String(c).trim().replace(/^LAG1\./,"")));return o&&o.repo&&o.token?o:null}catch(e){return null}}
+if(CF.code){var oc=fromCode(CF.code);if(oc){CF.repo=oc.repo;CF.token=oc.token}}
+if(CF.repo&&(!GH.repo||(CF.token&&GH.token!==CF.token))){GH={repo:CF.repo,token:CF.token||GH.token||""};try{localStorage.setItem("lag-gh",JSON.stringify(GH))}catch(e){}}
+if(CF.name&&!me){me=CF.name;try{localStorage.setItem("lag-me",me)}catch(e){}}
+function ghStatus(){return!GH.repo?"sync GitHub non configurée":ghErr?"erreur GitHub ("+ghErr+")":Q.length?Q.length+" en attente d'envoi":"synchronisé"}
+function ghH(){return{Authorization:"Bearer "+GH.token,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}}
+function ghApi(p){return"https://api.github.com/repos/"+GH.repo+p}
+function ghOk(){return GH.repo&&GH.token&&navigator.onLine!==false}
+function persistQ(){try{localStorage.setItem("lag-q",JSON.stringify(Q))}catch(e){}}
+function persistGC(){try{localStorage.setItem("lag-gh-cache",JSON.stringify(GC))}catch(e){}}
+function b64(t){return btoa(unescape(encodeURIComponent(t)))}
+function unb64(t){return decodeURIComponent(escape(atob(t.replace(/\s/g,""))))}
+function applyRemote(){Object.keys(GC.cases).forEach(function(k){var r=GC.cases[k];if(!cases[k]||(r.t||"")>(cases[k].t||""))cases[k]=r})}
+function enqueue(c){Q=Q.filter(function(x){return x.key!==c.key});Q.push(JSON.parse(JSON.stringify(c)));persistQ();status();flush()}
+async function flush(){if(busy||!ghOk()||!Q.length)return;busy=true;
+try{while(Q.length){var c=Q[0],p="cases/"+c.key+"/"+c.t.replace(/[:.]/g,"-")+"_"+slug(c.by||me)+".json";
+var r=await fetch(ghApi("/contents/"+p),{method:"PUT",headers:Object.assign({"Content-Type":"application/json"},ghH()),body:JSON.stringify({message:"Dossier "+c.id+" ("+(c.by||"?")+")",content:b64(JSON.stringify(c))})});
+if(r.status===200||r.status===201||r.status===422){ghErr=0;Q=Q.filter(function(x){return!(x.key===c.key&&x.t===c.t)});persistQ();status()}
+else{ghErr=r.status;break}}}catch(e){}
+busy=false;status()}
+async function pull(manual){if(pulling||!ghOk())return;pulling=true;
+try{var r=await fetch(ghApi("/git/trees/main?recursive=1"),{headers:ghH()});
+if(r.status===404||r.status===409){ghErr=r.status===404?404:0;pulling=false;status();return}
+if(!r.ok){ghErr=r.status;pulling=false;status();return}
+ghErr=0;var j=await r.json(),last={};
+j.tree.forEach(function(t){var m=/^cases\/([^\/]+)\/([^\/]+\.json)$/.exec(t.path);if(m&&t.type==="blob"&&(!last[m[1]]||m[2]>last[m[1]].name))last[m[1]]={name:m[2],sha:t.sha}});
+var todo=Object.keys(last).filter(function(k){return GC.seen[k]!==last[k].sha}),changed=false;
+for(var i=0;i<todo.length;i+=5){await Promise.all(todo.slice(i,i+5).map(async function(k){
+try{var br=await fetch(ghApi("/git/blobs/"+last[k].sha),{headers:ghH()});if(!br.ok)return;var bj=await br.json(),c=JSON.parse(unb64(bj.content));
+if(c&&c.key){if(!GC.cases[c.key]||(c.t||"")>(GC.cases[c.key].t||""))GC.cases[c.key]=c;GC.seen[k]=last[k].sha;changed=true}}catch(e){}}))}
+if(changed){persistGC();applyRemote();var a=document.activeElement;if(!(a&&/INPUT|TEXTAREA|SELECT/.test(a.tagName)))render()}
+if(manual)toast(changed?"Nouveaux dossiers reçus.":"Déjà à jour.")}catch(e){}
+pulling=false;status()}
+function activateCode(c){var o=fromCode(c);if(!o){toast("Code d'activation invalide.");return false}
+GH={repo:o.repo,token:o.token};ghErr=0;try{localStorage.setItem("lag-gh",JSON.stringify(GH))}catch(e){}status();render();syncAll();toast("Synchronisation activée.");return true}
+function cfgSync(){var c=prompt("Code d'activation :","");if(c!==null&&c.trim())activateCode(c)}
+function activate(){activateCode(v("act"))}
+function syncAll(){return flush().then(function(){return pull()})}
+window.addEventListener("online",syncAll);setInterval(syncAll,60000);
+if("serviceWorker" in navigator&&/^https?:/.test(location.protocol))navigator.serviceWorker.register("sw.js").catch(function(){});
+status();render();restore();syncAll();setInterval(function(){load()},30000);
+</script></body></html>
