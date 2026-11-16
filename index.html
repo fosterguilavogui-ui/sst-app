@@ -913,7 +913,7 @@ function idbKeys(st){return idb().then(function(db){if(!db)return Object.keys(PH
 async function photoPut(key,url){var e=await vEnc({p:url});e.t=new Date().toISOString();await idbSet("p",key,e);await idbSet("q",key,1);PHC[key]=url;await photoFlush();return true}
 async function ghPutFile(path,obj,msg){var body={message:msg,content:b64(JSON.stringify(obj))},put=function(){return fetch(ghApi("/contents/"+path),{method:"PUT",headers:Object.assign({"Content-Type":"application/json"},ghH()),body:JSON.stringify(body)})},r=await put();
 if(r.status===422||r.status===409){var g=await fetch(ghApi("/contents/"+path),{headers:ghH()});if(g.ok){body.sha=(await g.json()).sha;r=await put()}}return r.status===200||r.status===201}
-async function photoFlush(){if(!ghOk())return;var keys=await idbKeys("q");try{for(var i=0;i<keys.length;i++){var e=await idbGet("p",keys[i]);if(!e){await idbDel("q",keys[i]);continue}if(await ghPutFile("photos/"+keys[i]+".json",e,"Photo "+keys[i]))await idbDel("q",keys[i]);else break}}catch(x){}troPendN=(await idbKeys("q")).length}
+async function photoFlush(){if(!ghOk()||busy)return;busy=true;var keys=await idbKeys("q");try{for(var i=0;i<keys.length;i++){var e=await idbGet("p",keys[i]);if(!e){await idbDel("q",keys[i]);continue}if(await ghPutFile("photos/"+keys[i]+".json",e,"Photo "+keys[i]))await idbDel("q",keys[i]);else break}}catch(x){}busy=false;troPendN=(await idbKeys("q")).length}
 async function photoGet(key){if(!VK)return"";if(PHC[key])return PHC[key];var e=await idbGet("p",key);
 if(!e&&ghOk()){try{var r=await fetch(ghApi("/contents/photos/"+key+".json"),{headers:ghH()});if(r.ok){var j=await r.json();e=JSON.parse(unb64(j.content));if(e&&e.ct)await idbSet("p",key,e);else e=null}}catch(x){}}
 if(!e||!e.ct)return"";try{var u=(await vDec(e)).p;PHC[key]=u;return u}catch(x){return""}}
@@ -1101,6 +1101,9 @@ ok("Version de l'application : "+esc(APP_BUILD)+".");
 }catch(e){ko("Le diagnostic a rencontré une erreur : "+esc(String(e&&e.message||e)))}
 syncDiag=L.join("");render()}
 
+/* demandes à GitHub : abandon après un délai, pour ne jamais rester bloqué sur une réponse qui n'arrive pas */
+var GH_TIMEOUT=60000;
+(function(){var f0=fetch;if(f0.__fw||typeof AbortController==="undefined")return;var w=function(u,o){if(String(u).indexOf("api.github.com")<0)return f0(u,o);var c=new AbortController(),t=setTimeout(function(){c.abort()},GH_TIMEOUT);return f0(u,Object.assign({},o,{signal:c.signal})).then(function(r){clearTimeout(t);return r},function(e){clearTimeout(t);throw e})};w.__fw=1;fetch=w})();
 function saveTxt(){edit(sel,function(c){c.faits=v("d-faits");c.ana=v("d-ana");c.jp=parseInt(v("d-jp"))||0}).then(function(ok){if(ok)toast("Enregistré.")})}
 function setState(s){var c=cases[sel];
 if(s>=2&&!(document.getElementById("d-faits").value.trim()||c.faits.trim())){toast("Renseignez d'abord les faits confirmés.");return render()}
